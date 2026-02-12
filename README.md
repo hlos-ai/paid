@@ -1,11 +1,10 @@
 # @hlos/paid
 
-Minimal invocation-time monetization wrapper for agent-native commerce.
+Turn any MCP tool or API route into a paid capability in one line of code.
 
 ```ts
 import { paid } from '@hlos/paid';
 
-// One line monetization.
 export const myTool = paid({ skuId: 'my.tool.v1' })(handler);
 ```
 
@@ -32,35 +31,60 @@ Idempotency defaults:
 - MCP: `mcp:${skuId}:${toolCallId}`
 - Skills: `skills:${skuId}:${requestId|clientTag}`
 
-## Adapter Boundary
+## Settlement Model
+
+`paid()` does **not** call `/api/v2/x402/settle`.
+
+You have two explicit options:
+- Settle externally in your orchestrator and retry invocation with proof in `__hlos`.
+- Use the explicit helper `settleWithHlosKernel(...)` (opt-in), then retry invocation with proof.
+
+## Happy Path (Two-Step)
+
+1. First call -> `PAYMENT_REQUIRED`
 
 ```ts
-interface PaidKernelAdapter {
-  challenge(input): Promise<PaymentRequiredChallenge>;
-  settle?(input): Promise<SettleResult>; // optional; paid() does not call this
-  receipt?(input): Promise<ReceiptEnvelope | null>;
+try {
+  await myPaidTool(ctx, { key: 'foo' });
+} catch (error) {
+  // PaymentRequiredError: includes challenge payload + quote_id
 }
 ```
 
-Use your own adapter, or use `createHttpKernelAdapter()`.
+2. Settle externally (or via explicit helper)
 
-## External Settlement Model
+```ts
+import { settleWithHlosKernel } from '@hlos/paid';
 
-`paid()` does **not** settle x402 payments itself.
+const settled = await settleWithHlosKernel({
+  apiBaseUrl: process.env.HLOS_BASE_URL,
+  skuId: 'my.tool.v1',
+  quoteId: 'quote_123',
+  paymentSignature: 'signed-payment',
+  idempotencyKey: 'mcp:my.tool.v1:tool_call_123',
+});
+```
 
-Runtime flow:
-1. Invocation without settlement proof -> throws `PaymentRequiredError`.
-2. Caller settles externally (outside this wrapper).
-3. Caller retries invocation with proof in reserved `__hlos`.
-4. Wrapper enriches `ctx` and executes handler.
+3. Retry with `__hlos` proof
 
-## Reserved `__hlos` Input
+```ts
+await myPaidTool(ctx, {
+  key: 'foo',
+  __hlos: {
+    quote_id: 'quote_123',
+    payment_signature: 'signed-payment',
+    receipt_id: settled.receiptId,
+    request_id: 'tool_call_123',
+  },
+});
+```
+
+## Reserved `__hlos` Channel
 
 Use the same reserved field for HTTP bodies and MCP tool args:
 
 ```json
 {
-  "text": "hello",
   "__hlos": {
     "quote_id": "quote_...",
     "payment_signature": "signed_header_or_token",
@@ -73,17 +97,24 @@ Use the same reserved field for HTTP bodies and MCP tool args:
 }
 ```
 
-## Error Mapping Helpers
+## Helpers
 
 - `toHttpErrorResponse(error)` -> HTTP 402 body/headers for skills routes
 - `toMcpPaymentRequired(error)` -> MCP `PAYMENT_REQUIRED` payload
 - `toMcpToolErrorResult(payload)` -> MCP tool error object
 - `applyPaidResponseHeaders(headers, ctx)` -> `x-hlos-receipt-id`, `x-hlos-receipt-hash`, `x-hlos-payment-sighash`
+- `settleWithHlosKernel(...)` -> explicit helper for `/api/v2/x402/settle` (never auto-called by `paid()`)
 
 ## Examples
 
-- MCP usage: `/Users/misawa/paid/examples/mcp-tool.ts`
-- HTTP usage: `/Users/misawa/paid/examples/http-skill.ts`
+- MCP wrapper: `examples/mcp-tool.ts`
+- HTTP wrapper: `examples/http-skill.ts`
+- Settle script: `examples/settle-cli.ts`
+
+## Docs
+
+- External contracts: `DEPENDENCIES.md`
+- Stable protocol surface: `PROTOCOL.md`
 
 ## Local Development
 

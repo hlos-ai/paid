@@ -14,8 +14,8 @@
 
 ### `POST /api/v2/x402/settle`
 - **Not called by `paid()`**.
-- Settlement is external to this library.
-- Caller/orchestrator should settle first, then retry invocation with proof in `__hlos`.
+- Settlement is external to this wrapper by default.
+- Optional helper `settleWithHlosKernel(...)` can call this explicitly.
 
 ### `GET /api/v2/x402/receipt`
 - Optional receipt hydration by default adapter when `receipt_id` or `request_id` is provided.
@@ -53,7 +53,7 @@ Use config guards for policy gates:
 
 - `HLOS_BASE_URL` (optional)
   - default: `http://localhost:3000`
-  - used by the default HTTP adapter when `apiBaseUrl` is not set.
+  - used by default adapter/helper when `apiBaseUrl` is not set.
 
 ## Not Included (Intentionally)
 

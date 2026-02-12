@@ -4,6 +4,7 @@ import {
   PaymentRequiredError,
   applyPaidResponseHeaders,
   createHttpKernelAdapter,
+  settleWithHlosKernel,
   isPaymentRequiredError,
   paid,
   resetPaidIdempotencyCache,
@@ -304,6 +305,41 @@ describe('paid()', () => {
     await expect(wrapped({}, { text: 'missing request id' } as any)).rejects.toBeInstanceOf(
       MissingIdempotencyKeyError
     );
+  });
+
+  it('settleWithHlosKernel explicitly settles via /x402/settle', async () => {
+    const fetchImpl: FetchLike = vi.fn(async (url: string, init) => {
+      expect(url).toBe('http://hlos.test/api/v2/x402/settle');
+      expect(init?.method).toBe('POST');
+      expect(init?.headers?.['payment-signature']).toBe('sig_settle_1');
+
+      const body = JSON.parse(init?.body ?? '{}') as Record<string, unknown>;
+      expect(body).toMatchObject({
+        quote_id: 'quote_settle_1',
+        sku_id: 'sku.settle.v1',
+        request_id: 'skills:sku.settle.v1:req_settle_1',
+      });
+
+      return response(200, {
+        success: true,
+        receipt_id: 'brec_h_settle_1',
+        verification_url: 'https://hlos.example/verify/brec_h_settle_1',
+      });
+    });
+
+    const settled = await settleWithHlosKernel({
+      apiBaseUrl: 'http://hlos.test',
+      fetchImpl,
+      skuId: 'sku.settle.v1',
+      quoteId: 'quote_settle_1',
+      paymentSignature: 'sig_settle_1',
+      idempotencyKey: 'skills:sku.settle.v1:req_settle_1',
+    });
+
+    expect(settled.receiptId).toBe('brec_h_settle_1');
+    expect(settled.verificationUrl).toBe('https://hlos.example/verify/brec_h_settle_1');
+    expect(settled.paymentSigHash).toBeDefined();
+    expect((fetchImpl as any).mock.calls.length).toBe(1);
   });
 
   it('default adapter settle method is explicit and never used by paid()', async () => {

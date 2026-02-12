@@ -552,6 +552,69 @@ export interface HttpKernelAdapterConfig {
   fetchImpl?: FetchLike;
 }
 
+export interface SettleWithHlosKernelInput extends SettleInput {
+  apiBaseUrl?: string;
+  fetchImpl?: FetchLike;
+  capabilityId?: string;
+  walletId?: string;
+}
+
+export async function settleWithHlosKernel(
+  input: SettleWithHlosKernelInput
+): Promise<SettleResult> {
+  const fetchImpl = resolveFetch(input.fetchImpl);
+  const baseUrl = normalizeBaseUrl(input.apiBaseUrl ?? process.env.HLOS_BASE_URL ?? 'http://localhost:3000');
+
+  const response = await fetchImpl(`${baseUrl}/api/v2/x402/settle`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'payment-signature': input.paymentSignature,
+    },
+    body: JSON.stringify({
+      quote_id: input.quoteId,
+      sku_id: input.skuId,
+      request_id: input.idempotencyKey,
+      capability_id: input.capabilityId,
+      wallet_id: input.walletId,
+    }),
+  });
+
+  const body = await safeJson(response);
+  if (!response.ok) {
+    const code =
+      readString(readRecord(readUnknown(readRecord(body), 'error')), 'code')?.toUpperCase() ??
+      'SETTLEMENT_FAILED';
+    const message =
+      readString(readRecord(readUnknown(readRecord(body), 'error')), 'message') ??
+      'Payment settlement failed';
+
+    throw new PaidError(code, message, response.status, body);
+  }
+
+  const receiptId =
+    readString(readRecord(body), 'receipt_id') ??
+    getHeader(response.headers, 'x-hlos-receipt-id') ??
+    `receipt_${sha256Hex(`${input.idempotencyKey}:${input.paymentSignature}`).slice(0, 16)}`;
+
+  const receiptHash =
+    readString(readRecord(body), 'receipt_hash') ??
+    readString(readRecord(readUnknown(readRecord(body), 'receipt')), 'content_hash') ??
+    undefined;
+
+  const verificationUrl =
+    readString(readRecord(body), 'verification_url') ??
+    undefined;
+
+  return {
+    receiptId,
+    receiptHash,
+    paymentSigHash: sha256Hex(input.paymentSignature),
+    verificationUrl,
+    raw: body,
+  };
+}
+
 export function createHttpKernelAdapter(config: HttpKernelAdapterConfig = {}): PaidKernelAdapter {
   const fetchImpl = resolveFetch(config.fetchImpl);
   const baseUrl = normalizeBaseUrl(config.baseUrl ?? process.env.HLOS_BASE_URL ?? 'http://localhost:3000');
