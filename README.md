@@ -28,6 +28,22 @@ Context enrichment (wrapper mutates existing `ctx`):
 - `ctx.receipt`
 - `ctx.paid = { skuId, channel, sandbox, idempotencyKey }`
 
+Idempotency defaults:
+- MCP: `mcp:${skuId}:${toolCallId}`
+- Skills: `skills:${skuId}:${requestId|clientTag}`
+
+## Adapter Boundary
+
+```ts
+interface PaidKernelAdapter {
+  challenge(input): Promise<PaymentRequiredChallenge>;
+  settle?(input): Promise<SettleResult>; // optional; paid() does not call this
+  receipt?(input): Promise<ReceiptEnvelope | null>;
+}
+```
+
+Use your own adapter, or use `createHttpKernelAdapter()`.
+
 ## External Settlement Model
 
 `paid()` does **not** settle x402 payments itself.
@@ -37,8 +53,6 @@ Runtime flow:
 2. Caller settles externally (outside this wrapper).
 3. Caller retries invocation with proof in reserved `__hlos`.
 4. Wrapper enriches `ctx` and executes handler.
-
-This keeps payment orchestration explicit and avoids coupling the wrapper to wallet/kernel internals.
 
 ## Reserved `__hlos` Input
 
@@ -64,10 +78,7 @@ Use the same reserved field for HTTP bodies and MCP tool args:
 - `toHttpErrorResponse(error)` -> HTTP 402 body/headers for skills routes
 - `toMcpPaymentRequired(error)` -> MCP `PAYMENT_REQUIRED` payload
 - `toMcpToolErrorResult(payload)` -> MCP tool error object
-- `applyPaidResponseHeaders(headers, ctx)` ->
-  - `x-hlos-receipt-id`
-  - `x-hlos-receipt-hash`
-  - `x-hlos-payment-sighash`
+- `applyPaidResponseHeaders(headers, ctx)` -> `x-hlos-receipt-id`, `x-hlos-receipt-hash`, `x-hlos-payment-sighash`
 
 ## Examples
 
