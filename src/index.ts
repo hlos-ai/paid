@@ -36,6 +36,8 @@ export interface PaidContext {
     url?: string;
   } | null;
   headers?: HeaderBag;
+  actorId?: string;
+  meta?: Record<string, unknown>;
   request_id?: string;
   correlationId?: string;
   toolCallId?: string | number;
@@ -1355,3 +1357,5 @@ function sha256Hex(input: string): string {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
+
+export * from './context';
