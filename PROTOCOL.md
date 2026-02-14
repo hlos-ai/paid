@@ -7,7 +7,7 @@ This file defines the stable invocation contract for `@hlos/paid`.
 ### HTTP skills
 When unpaid, `paid()` throws `PaymentRequiredError`; map it with `toHttpErrorResponse(error)`.
 
-Expected response shape:
+Expected HTTP response shape:
 - status: `402`
 - body:
   - `error.code = payment_required`
@@ -39,7 +39,7 @@ Use `toMcpPaymentRequired(error)` + `toMcpToolErrorResult(payload)`.
 
 ## 2) Reserved `__hlos` Fields
 
-`__hlos` is a reserved proof channel supported in both HTTP body payloads and MCP args.
+`__hlos` is a request-scoped proof channel supported in both HTTP body payloads and MCP args.
 
 Supported fields:
 - `quote_id?: string`
@@ -52,41 +52,89 @@ Supported fields:
 - `staampid?: string`
 - `trust_score?: number`
 
+Semantics:
+- additive (does not replace existing auth/identity headers)
+- per-request (not session-wide)
+
 ## 3) Idempotency Guarantees
 
-If `ctx.idempotency_key` is present, it is used as-is.
-
-Otherwise defaults:
-- MCP: `mcp:${skuId}:${toolCallId}`
-- Skills: `skills:${skuId}:${requestId|clientTag}`
+For `paid(config)(handler)`:
+- if `ctx.idempotency_key` exists, use it
+- otherwise defaults:
+  - MCP: `mcp:${skuId}:${toolCallId}`
+  - Skills: `skills:${skuId}:${requestId|clientTag}`
 
 A reused idempotency key with different proof material throws `IDEMPOTENCY_CONFLICT`.
+
+For `settleWithHlosKernel(...)`:
+- accepts optional `idempotencyKey`
+- if omitted, derives deterministic key:
+  - `settle:${skuId}:${sha256(quoteId:paymentSignature)[0..24]}`
 
 ## 4) Settlement Behavior
 
 - `paid()` never calls `/api/v2/x402/settle`.
-- `paid()` requires proof on paid path:
-  - `payment_signature` plus one anchor: `receipt_id` or `request_id` or `client_tag`.
+- `paid()` paid-path proof requirements:
+  - `payment_signature` plus one anchor: `receipt_id` or `request_id` or `client_tag`
 - Optional receipt hydration may call `GET /api/v2/x402/receipt`.
 
 Explicit helper (opt-in):
 - `settleWithHlosKernel(...)` calls `POST /api/v2/x402/settle`.
-- This helper is never called automatically by `paid()`.
+- It returns both settlement details and retry-ready `__hlos`.
+- It is never invoked automatically by `paid()`.
 
-## 5) Stable Headers for Paid Success
+## 5) `settleWithHlosKernel(...)` Output Contract
+
+```json
+{
+  "settlement": {
+    "receiptId": "...",
+    "receiptHash": "...optional...",
+    "paymentSigHash": "...",
+    "verificationUrl": "...optional...",
+    "requestId": "...",
+    "raw": "..."
+  },
+  "__hlos": {
+    "quote_id": "...",
+    "payment_signature": "...",
+    "receipt_id": "...",
+    "receipt_hash": "...optional...",
+    "request_id": "..."
+  }
+}
+```
+
+## 6) Settlement Error Codes
+
+`settleWithHlosKernel(...)` throws `PaidError` with stable code families:
+- `SETTLEMENT_MISSING_QUOTE_ID` (no `quoteId` or challenge containing one)
+- `SETTLEMENT_NETWORK_ERROR`
+- `SETTLEMENT_BAD_REQUEST`
+- `SETTLEMENT_UNAUTHORIZED`
+- `FORBIDDEN`
+- `PAYMENT_REQUIRED`
+- `SETTLEMENT_NOT_FOUND`
+- `SETTLEMENT_CONFLICT`
+- `RATE_LIMITED`
+- `SETTLEMENT_UPSTREAM_ERROR`
+- `SETTLEMENT_FAILED`
+
+## 7) Stable Headers for Paid Success
 
 Use `applyPaidResponseHeaders(headers, ctx)` to emit:
 - `x-hlos-receipt-id`
 - `x-hlos-receipt-hash`
 - `x-hlos-payment-sighash`
 
-## 6) Stability Statement
+## 8) Stability Statement
 
 The following are intended stable primitives for integrators:
 - `paid(config)(handler)` wrapper semantics
 - `PaymentRequiredError` signaling
 - `__hlos` reserved proof channel
 - idempotency key defaults
+- explicit helper contract (`settleWithHlosKernel`)
 - response helper APIs (`toHttpErrorResponse`, MCP helpers, header helpers)
 
-Internal implementation details may evolve as long as these surface contracts remain compatible.
+Internal implementation details may evolve as long as these contracts remain compatible.
