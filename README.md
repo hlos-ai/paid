@@ -31,57 +31,84 @@ Idempotency defaults:
 - MCP: `mcp:${skuId}:${toolCallId}`
 - Skills: `skills:${skuId}:${requestId|clientTag}`
 
-## Settlement Model
+## Settlement Model (Important)
 
-`paid()` does **not** call `/api/v2/x402/settle`.
+`paid()` never calls `/api/v2/x402/settle`.
 
-You have two explicit options:
-- Settle externally in your orchestrator and retry invocation with proof in `__hlos`.
-- Use the explicit helper `settleWithHlosKernel(...)` (opt-in), then retry invocation with proof.
+You must settle externally, then retry with proof in `__hlos`.
 
-## Happy Path (Two-Step)
+Optional helper:
+- `settleWithHlosKernel(...)` performs explicit settlement against HLOS.
+- It is opt-in and never called automatically by `paid()`.
 
-1. First call -> `PAYMENT_REQUIRED`
+## Two-Step Happy Path
+
+1. First invocation returns/throws `PAYMENT_REQUIRED`.
+2. Settle with your own orchestrator or `settleWithHlosKernel(...)`.
+3. Retry the same invocation with `__hlos` proof.
 
 ```ts
+import { paid, settleWithHlosKernel } from '@hlos/paid';
+
+const secretQuery = paid({ skuId: 'secrets.query.v1', channel: 'mcp' })(async (_ctx, input) => {
+  return querySecret(input.key);
+});
+
+let quoteId: string | undefined;
+
 try {
-  await myPaidTool(ctx, { key: 'foo' });
-} catch (error) {
-  // PaymentRequiredError: includes challenge payload + quote_id
+  await secretQuery(ctx, { key: 'api_key_1' });
+} catch (error: any) {
+  quoteId = error?.quote_id; // from PaymentRequiredError
 }
-```
-
-2. Settle externally (or via explicit helper)
-
-```ts
-import { settleWithHlosKernel } from '@hlos/paid';
 
 const settled = await settleWithHlosKernel({
   apiBaseUrl: process.env.HLOS_BASE_URL,
-  skuId: 'my.tool.v1',
-  quoteId: 'quote_123',
-  paymentSignature: 'signed-payment',
-  idempotencyKey: 'mcp:my.tool.v1:tool_call_123',
+  skuId: 'secrets.query.v1',
+  quoteId,
+  paymentSignature: '<signed-payment>',
+  idempotencyKey: 'mcp:secrets.query.v1:tool_call_123',
+});
+
+await secretQuery(ctx, {
+  key: 'api_key_1',
+  __hlos: settled.__hlos,
 });
 ```
 
-3. Retry with `__hlos` proof
+## `settleWithHlosKernel(...)` Contract
 
-```ts
-await myPaidTool(ctx, {
-  key: 'foo',
-  __hlos: {
-    quote_id: 'quote_123',
-    payment_signature: 'signed-payment',
-    receipt_id: settled.receiptId,
-    request_id: 'tool_call_123',
-  },
-});
-```
+Input:
+- `skuId: string` (required)
+- `paymentSignature: string` (required)
+- `quoteId?: string`
+- `challenge?: PaymentRequiredChallenge | Record<string, unknown>` (raw challenge accepted; `quote_id` extracted)
+- `idempotencyKey?: string`
+- `apiBaseUrl?: string` (defaults to `HLOS_BASE_URL` or `http://localhost:3000`)
+- `fetchImpl?: FetchLike`
+- `capabilityId?: string`
+- `walletId?: string`
+
+Output:
+- `settlement: { receiptId, receiptHash?, paymentSigHash, verificationUrl?, requestId, raw? }`
+- `__hlos: { quote_id, payment_signature, receipt_id, receipt_hash?, request_id }`
+
+Error semantics (`PaidError`):
+- `SETTLEMENT_NETWORK_ERROR` (network/transport failure)
+- `SETTLEMENT_BAD_REQUEST` / `SETTLEMENT_UNAUTHORIZED` / `FORBIDDEN`
+- `PAYMENT_REQUIRED` (still not payable)
+- `SETTLEMENT_CONFLICT` / `RATE_LIMITED`
+- `SETTLEMENT_UPSTREAM_ERROR` / `SETTLEMENT_FAILED`
 
 ## Reserved `__hlos` Channel
 
-Use the same reserved field for HTTP bodies and MCP tool args:
+`__hlos` is a request-scoped proof channel:
+- HTTP skills: put it in request body JSON as `__hlos`.
+- MCP tools: put it in tool args as `__hlos`.
+
+Semantics:
+- additive (does not replace auth headers or identity context)
+- per-request (not session-wide)
 
 ```json
 {
@@ -99,27 +126,32 @@ Use the same reserved field for HTTP bodies and MCP tool args:
 
 ## Helpers
 
-- `toHttpErrorResponse(error)` -> HTTP 402 body/headers for skills routes
+- `toHttpErrorResponse(error)` -> HTTP 402 mapping for skills routes
 - `toMcpPaymentRequired(error)` -> MCP `PAYMENT_REQUIRED` payload
 - `toMcpToolErrorResult(payload)` -> MCP tool error object
 - `applyPaidResponseHeaders(headers, ctx)` -> `x-hlos-receipt-id`, `x-hlos-receipt-hash`, `x-hlos-payment-sighash`
-- `settleWithHlosKernel(...)` -> explicit helper for `/api/v2/x402/settle` (never auto-called by `paid()`)
+- `settleWithHlosKernel(...)` -> explicit settlement helper (never auto-called by `paid()`)
 
 ## Examples
 
 - MCP wrapper: `examples/mcp-tool.ts`
 - HTTP wrapper: `examples/http-skill.ts`
-- Settle script: `examples/settle-cli.ts`
+- Demo settle helper: `examples/settle-cli.ts`
 
 ## Docs
 
-- External contracts: `DEPENDENCIES.md`
-- Stable protocol surface: `PROTOCOL.md`
+- External endpoint dependencies: `DEPENDENCIES.md`
+- Stable protocol contract: `PROTOCOL.md`
+
+## Edge Runtimes
+
+On Edge runtimes (Vercel Edge, Cloudflare Workers, Deno Deploy) pass `apiBaseUrl` explicitly — `process.env` is not read when unavailable.
 
 ## Local Development
 
 ```bash
-npm run typecheck
-npm test
+npm i
+npm run test
 npm run build
+npx publint
 ```

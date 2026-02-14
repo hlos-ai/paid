@@ -99,9 +99,41 @@ describe('paid()', () => {
     expect(mcpPayload.code).toBe('PAYMENT_REQUIRED');
     expect(mcpPayload.payment_required).toBeDefined();
 
-    const toolError = toMcpToolErrorResult(mcpPayload as unknown as Record<string, unknown>);
+    const toolError = toMcpToolErrorResult(mcpPayload);
     expect(toolError.isError).toBe(true);
     expect(toolError.structuredContent.code).toBe('PAYMENT_REQUIRED');
+  });
+
+  it('never calls adapter.settle during paid() flow, even when payment is required', async () => {
+    const adapter: PaidKernelAdapter = {
+      challenge: vi.fn(async () => ({
+        payment_required: {
+          x402Version: 1,
+          accepts: [{ asset: 'USDC', amount: '1' }],
+        },
+        quote_id: 'quote_req_1',
+      })),
+      settle: vi.fn(),
+      receipt: vi.fn(),
+    };
+
+    const wrapped = paid({
+      skuId: 'model.inference.text.v1',
+      channel: 'skills',
+      adapter,
+    })(async () => ({ ok: true }));
+
+    await expect(
+      wrapped(
+        {
+          request_id: 'req_payment_required_1',
+        },
+        { text: 'hello' } as any
+      )
+    ).rejects.toBeInstanceOf(PaymentRequiredError);
+
+    expect((adapter.challenge as any).mock.calls.length).toBe(1);
+    expect((adapter.settle as any).mock.calls.length).toBe(0);
   });
 
   it('uses external settlement proof, enriches ctx, and does not call /x402/settle', async () => {
@@ -132,7 +164,7 @@ describe('paid()', () => {
       channel: 'skills',
       fetchImpl,
       apiBaseUrl: 'http://hlos.test',
-    })(async (ctx, input: { text: string }) => {
+    })(async (ctx, input: { text: string; __hlos?: Record<string, unknown> }) => {
       expect((input as any).__hlos).toBeUndefined();
       return {
         translated: input.text.toUpperCase(),
@@ -336,10 +368,121 @@ describe('paid()', () => {
       idempotencyKey: 'skills:sku.settle.v1:req_settle_1',
     });
 
-    expect(settled.receiptId).toBe('brec_h_settle_1');
-    expect(settled.verificationUrl).toBe('https://hlos.example/verify/brec_h_settle_1');
-    expect(settled.paymentSigHash).toBeDefined();
+    expect(settled.settlement.receiptId).toBe('brec_h_settle_1');
+    expect(settled.settlement.verificationUrl).toBe('https://hlos.example/verify/brec_h_settle_1');
+    expect(settled.settlement.paymentSigHash).toBeDefined();
+    expect(settled.__hlos).toMatchObject({
+      quote_id: 'quote_settle_1',
+      payment_signature: 'sig_settle_1',
+      receipt_id: 'brec_h_settle_1',
+      request_id: 'skills:sku.settle.v1:req_settle_1',
+    });
     expect((fetchImpl as any).mock.calls.length).toBe(1);
+  });
+
+  it('settleWithHlosKernel derives a stable idempotency key when one is not provided', async () => {
+    const fetchImpl: FetchLike = vi.fn(async (_url: string, init) => {
+      const body = JSON.parse(init?.body ?? '{}') as Record<string, unknown>;
+      expect(body.request_id).toMatch(/^settle:sku.settle.v1:/);
+
+      return response(200, {
+        success: true,
+        receipt_id: 'brec_h_settle_derived_1',
+      });
+    });
+
+    const settled = await settleWithHlosKernel({
+      apiBaseUrl: 'http://hlos.test',
+      fetchImpl,
+      skuId: 'sku.settle.v1',
+      challenge: {
+        quote_id: 'quote_settle_derived_1',
+      },
+      paymentSignature: 'sig_settle_derived_1',
+    });
+
+    expect(settled.settlement.requestId).toMatch(/^settle:sku.settle.v1:/);
+    expect(settled.__hlos.request_id).toBe(settled.settlement.requestId);
+    expect(settled.__hlos.quote_id).toBe('quote_settle_derived_1');
+  });
+
+  it('settleWithHlosKernel preserves structured upstream errors', async () => {
+    const fetchImpl: FetchLike = vi.fn(async () => {
+      return response(429, {
+        error: {
+          code: 'rate_limited',
+          message: 'Slow down',
+          retry_after: 2,
+        },
+      });
+    });
+
+    await expect(
+      settleWithHlosKernel({
+        apiBaseUrl: 'http://hlos.test',
+        fetchImpl,
+        skuId: 'sku.settle.v1',
+        quoteId: 'quote_rate_1',
+        paymentSignature: 'sig_rate_1',
+      })
+    ).rejects.toMatchObject({
+      code: 'RATE_LIMITED',
+      status: 429,
+      details: {
+        sku_id: 'sku.settle.v1',
+      },
+    });
+  });
+
+  it('settleWithHlosKernel handles non-json responses and network failures with typed codes', async () => {
+    const nonJsonFetch: FetchLike = vi.fn(async () => {
+      return {
+        ok: false,
+        status: 500,
+        headers: {
+          get: () => null,
+        },
+        async json() {
+          throw new Error('invalid json');
+        },
+        async text() {
+          return 'upstream failure';
+        },
+      };
+    });
+
+    await expect(
+      settleWithHlosKernel({
+        apiBaseUrl: 'http://hlos.test',
+        fetchImpl: nonJsonFetch,
+        skuId: 'sku.settle.v1',
+        quoteId: 'quote_non_json_1',
+        paymentSignature: 'sig_non_json_1',
+      })
+    ).rejects.toMatchObject({
+      code: 'SETTLEMENT_UPSTREAM_ERROR',
+      status: 500,
+      details: {
+        response: 'upstream failure',
+      },
+    });
+
+    const networkFetch: FetchLike = vi.fn(async () => {
+      throw new Error('ECONNREFUSED');
+    });
+
+    await expect(
+      settleWithHlosKernel({
+        apiBaseUrl: 'http://hlos.test',
+        fetchImpl: networkFetch,
+        skuId: 'sku.settle.v1',
+        quoteId: 'quote_network_1',
+        paymentSignature: 'sig_network_1',
+      })
+    ).rejects.toMatchObject({
+      code: 'SETTLEMENT_NETWORK_ERROR',
+      status: 502,
+    });
   });
 
   it('default adapter settle method is explicit and never used by paid()', async () => {
