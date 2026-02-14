@@ -22,6 +22,45 @@ Config:
 - `sandbox?: boolean`
 - `envelope?: boolean`
 
+## Runtime Support
+
+- Runtime: Node.js 20+ server runtimes.
+- Default build is not Edge-compatible because the package imports Node crypto APIs.
+- Set `apiBaseUrl` explicitly when you do not want to rely on `HLOS_BASE_URL`.
+
+### Edge Recipe (Today)
+
+If you run workloads on Edge today, keep payment gating/settlement in a Node service:
+1. Edge receives the incoming request/tool call.
+2. Edge forwards to a Node service that runs `paid(...)`.
+3. Node returns `PAYMENT_REQUIRED` or success with paid metadata.
+4. Client/agent settles externally, retries with `__hlos`, and Edge forwards again.
+
+For native Edge package support, use a separate web-targeted entrypoint/fork that replaces Node crypto usage with WebCrypto.
+
+## Context Builders
+
+Use exported builders to centralize deterministic id derivation:
+
+```ts
+import { buildPaidContextFromHttp, buildPaidContextFromMcp } from '@hlos/paid';
+// Optional subpath import:
+// import { buildPaidContextFromHttp, buildPaidContextFromMcp } from '@hlos/paid/context';
+
+const httpCtx = buildPaidContextFromHttp({
+  skuId: 'model.inference.text.v1',
+  headers: requestHeaders,
+});
+
+const mcpCtx = buildPaidContextFromMcp({
+  skuId: 'secrets.query.v1',
+  toolCallId: toolCall.id,
+});
+```
+
+Both throw `MissingIdempotencySourceError` if a deterministic source is missing.
+For HTTP, `x-correlation-id` is a last-resort fallback. Prefer explicit `requestId` or `x-request-id`.
+
 Context enrichment (wrapper mutates existing `ctx`):
 - `ctx.payment`
 - `ctx.receipt`
@@ -95,10 +134,12 @@ Output:
 
 Error semantics (`PaidError`):
 - `SETTLEMENT_NETWORK_ERROR` (network/transport failure)
-- `SETTLEMENT_BAD_REQUEST` / `SETTLEMENT_UNAUTHORIZED` / `FORBIDDEN`
+- `SETTLEMENT_BAD_REQUEST`
 - `PAYMENT_REQUIRED` (still not payable)
-- `SETTLEMENT_CONFLICT` / `RATE_LIMITED`
-- `SETTLEMENT_UPSTREAM_ERROR` / `SETTLEMENT_FAILED`
+- `RATE_LIMITED`
+- `SETTLEMENT_UPSTREAM_ERROR`
+
+Canonical full list: `PROTOCOL.md` ("Settlement Error Codes").
 
 ## Reserved `__hlos` Channel
 
@@ -130,6 +171,8 @@ Semantics:
 - `toMcpPaymentRequired(error)` -> MCP `PAYMENT_REQUIRED` payload
 - `toMcpToolErrorResult(payload)` -> MCP tool error object
 - `applyPaidResponseHeaders(headers, ctx)` -> `x-hlos-receipt-id`, `x-hlos-receipt-hash`, `x-hlos-payment-sighash`
+- `buildPaidContextFromHttp(...)` -> deterministic HTTP/skills context builder
+- `buildPaidContextFromMcp(...)` -> deterministic MCP context builder
 - `settleWithHlosKernel(...)` -> explicit settlement helper (never auto-called by `paid()`)
 
 ## Examples
@@ -142,10 +185,7 @@ Semantics:
 
 - External endpoint dependencies: `DEPENDENCIES.md`
 - Stable protocol contract: `PROTOCOL.md`
-
-## Edge Runtimes
-
-On Edge runtimes (Vercel Edge, Cloudflare Workers, Deno Deploy) pass `apiBaseUrl` explicitly — `process.env` is not read when unavailable.
+- Integration guide and recipes: `INTEGRATION.md`
 
 ## Local Development
 

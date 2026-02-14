@@ -1,7 +1,9 @@
 import {
+  buildPaidContextFromMcp,
   isForbiddenError,
   isPaidError,
   isPaymentRequiredError,
+  MissingIdempotencySourceError,
   paid,
   toMcpForbidden,
   toMcpPaymentRequired,
@@ -22,13 +24,27 @@ export const secretQuery = paid({ skuId: SKU_ID, channel: 'mcp' })(
 );
 
 export async function handleSecretQueryMcp(args: { key: string; __hlos?: Record<string, unknown> }) {
-  const ctx: PaidContext = {
-    channel: 'mcp',
-    toolCallId: String(args.__hlos?.tool_call_id ?? 'tool_call_unknown'),
-    request_id: typeof args.__hlos?.request_id === 'string' ? args.__hlos.request_id : undefined,
-    __hlos: args.__hlos,
-    paymentProof: args.__hlos,
-  };
+  let ctx: PaidContext;
+  try {
+    ctx = buildPaidContextFromMcp({
+      skuId: SKU_ID,
+      toolCallId:
+        typeof args.__hlos?.tool_call_id === 'string' ? args.__hlos.tool_call_id : undefined,
+    });
+  } catch (error) {
+    if (error instanceof MissingIdempotencySourceError) {
+      return toMcpToolErrorResult({
+        code: 'MISSING_IDEMPOTENCY_KEY',
+        message: error.message,
+      });
+    }
+    throw error;
+  }
+
+  ctx.request_id =
+    typeof args.__hlos?.request_id === 'string' ? args.__hlos.request_id : ctx.request_id;
+  ctx.__hlos = args.__hlos;
+  ctx.paymentProof = args.__hlos;
 
   try {
     return await secretQuery(ctx, args as { key: string });

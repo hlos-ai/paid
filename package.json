@@ -16,6 +16,16 @@
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
       }
+    },
+    "./context": {
+      "import": {
+        "types": "./dist/context.d.ts",
+        "default": "./dist/context.js"
+      },
+      "require": {
+        "types": "./dist/context.d.cts",
+        "default": "./dist/context.cjs"
+      }
     }
   },
   "files": [
@@ -23,13 +33,14 @@
     "src",
     "examples",
     "README.md",
+    "INTEGRATION.md",
     "DEPENDENCIES.md",
     "PROTOCOL.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format esm,cjs --dts",
+    "build": "tsup src/index.ts src/context.ts --format esm,cjs --dts",
     "prepack": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
