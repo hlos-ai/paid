@@ -1,0 +1,24 @@
+name: Ecosystem Conformance
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/index.ts'
+      - 'src/context.ts'
+      - 'tests/conformance.test.ts'
+      - 'package.json'
+      - 'package-lock.json'
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Run conformance tests against @hlos-ai/schemas + @hlos/mcp-sdk
+        run: npx vitest run tests/conformance.test.ts
