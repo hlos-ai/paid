@@ -132,14 +132,15 @@ Output:
 - `settlement: { receiptId, receiptHash?, paymentSigHash, verificationUrl?, requestId, raw? }`
 - `__hlos: { quote_id, payment_signature, receipt_id, receipt_hash?, request_id }`
 
-Error semantics (`PaidError`):
-- `SETTLEMENT_NETWORK_ERROR` (network/transport failure)
-- `SETTLEMENT_BAD_REQUEST`
-- `PAYMENT_REQUIRED` (still not payable)
+Error semantics (`PaidError`) — canonical HLOS Kernel codes:
+- `INVALID_REQUEST` (missing `quoteId`, bad request)
+- `UNAUTHORIZED`
+- `INSUFFICIENT_BALANCE` (402 — payment still required)
 - `RATE_LIMITED`
-- `SETTLEMENT_UPSTREAM_ERROR`
+- `SERVICE_UNAVAILABLE` (network failure, 5xx upstream)
+- `INTERNAL_ERROR` (non-5xx unmapped status)
 
-Canonical full list: `PROTOCOL.md` ("Settlement Error Codes").
+Full list: `PROTOCOL.md` ("Settlement Error Codes").
 
 ## Reserved `__hlos` Channel
 

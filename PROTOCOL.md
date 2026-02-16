@@ -107,18 +107,19 @@ Explicit helper (opt-in):
 
 ## 6) Settlement Error Codes
 
-`settleWithHlosKernel(...)` throws `PaidError` with stable code families:
-- `SETTLEMENT_MISSING_QUOTE_ID` (no `quoteId` or challenge containing one)
-- `SETTLEMENT_NETWORK_ERROR`
-- `SETTLEMENT_BAD_REQUEST`
-- `SETTLEMENT_UNAUTHORIZED`
+`settleWithHlosKernel(...)` throws `PaidError` with canonical HLOS Kernel error codes:
+- `INVALID_REQUEST` (missing `quoteId`, bad request)
+- `UNAUTHORIZED`
 - `FORBIDDEN`
-- `PAYMENT_REQUIRED`
-- `SETTLEMENT_NOT_FOUND`
-- `SETTLEMENT_CONFLICT`
+- `NOT_FOUND`
+- `INSUFFICIENT_BALANCE` (402 — payment still required)
+- `CONFLICT`
 - `RATE_LIMITED`
-- `SETTLEMENT_UPSTREAM_ERROR`
-- `SETTLEMENT_FAILED`
+- `SERVICE_UNAVAILABLE` (network failure, 5xx upstream)
+- `INTERNAL_ERROR` (non-5xx unmapped status)
+
+All codes belong to the canonical `KernelErrorCode` set from `@hlos-ai/schemas`.
+Upstream codes already in the canonical set pass through unchanged.
 
 ## 7) Stable Headers for Paid Success
 
