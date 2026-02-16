@@ -344,6 +344,9 @@ describe('paid()', () => {
       expect(url).toBe('http://hlos.test/api/v2/x402/settle');
       expect(init?.method).toBe('POST');
       expect(init?.headers?.['payment-signature']).toBe('sig_settle_1');
+      expect(init?.headers?.['x-hlos-surface']).toBe('x402');
+      expect(init?.headers?.['x-hlos-idempotency-key']).toBe('skills:sku.settle.v1:req_settle_1');
+      expect(init?.headers?.['x-hlos-correlation-id']).toBeDefined();
 
       const body = JSON.parse(init?.body ?? '{}') as Record<string, unknown>;
       expect(body).toMatchObject({
@@ -460,7 +463,7 @@ describe('paid()', () => {
         paymentSignature: 'sig_non_json_1',
       })
     ).rejects.toMatchObject({
-      code: 'SETTLEMENT_UPSTREAM_ERROR',
+      code: 'SERVICE_UNAVAILABLE',
       status: 500,
       details: {
         response: 'upstream failure',
@@ -480,7 +483,7 @@ describe('paid()', () => {
         paymentSignature: 'sig_network_1',
       })
     ).rejects.toMatchObject({
-      code: 'SETTLEMENT_NETWORK_ERROR',
+      code: 'SERVICE_UNAVAILABLE',
       status: 502,
     });
   });

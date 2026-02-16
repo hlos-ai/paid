@@ -47,8 +47,9 @@
     "typecheck": "tsc --noEmit",
     "check:pkg": "publint"
   },
-  "dependencies": {},
   "devDependencies": {
+    "@hlos-ai/schemas": "^0.4.2",
+    "@hlos/mcp-sdk": "^0.2.0",
     "@types/node": "^20.17.0",
     "publint": "^0.3.13",
     "tsup": "^8.3.5",

@@ -1,5 +1,54 @@
 import { createHash, randomUUID } from 'node:crypto';
 
+/**
+ * Canonical HLOS Kernel v2 surface identifier for x402 payment operations.
+ * Sent as `X-HLOS-Surface` header on all outgoing v2 API calls.
+ * @see @hlos-ai/schemas — SURFACES, SurfaceSchema
+ */
+export const HLOS_SURFACE = 'x402' as const;
+
+/**
+ * Canonical HLOS Kernel error codes from @hlos-ai/schemas KernelErrorCodeSchema.
+ * @hlos/paid maps settlement errors to this set where possible.
+ * Codes outside this set are preserved but flagged as non-canonical.
+ */
+export const CANONICAL_KERNEL_ERROR_CODES: ReadonlySet<string> = new Set([
+  'VALIDATION_ERROR',
+  'INVALID_REQUEST',
+  'UNAUTHORIZED',
+  'FORBIDDEN',
+  'NOT_FOUND',
+  'CROSSING_NOT_FOUND',
+  'STACK_NOT_FOUND',
+  'STACK_CONNECTION_NOT_FOUND',
+  'CONFLICT',
+  'INVALID_STATE_TRANSITION',
+  'CROSSING_ALREADY_SETTLED',
+  'IDEMPOTENCY_CONFLICT',
+  'INSUFFICIENT_BALANCE',
+  'SPEND_CAP_EXCEEDED',
+  'RATE_LIMITED',
+  'INTERNAL_ERROR',
+  'SERVICE_UNAVAILABLE',
+]);
+
+/**
+ * Maps @hlos/paid-specific error codes to their closest canonical KernelErrorCode.
+ * Useful for interop with systems that only understand the canonical set.
+ */
+export const PAID_ERROR_CODE_MAP: Readonly<Record<string, string>> = {
+  PAYMENT_REQUIRED: 'INSUFFICIENT_BALANCE',
+  MISSING_IDEMPOTENCY_KEY: 'INVALID_REQUEST',
+  EXTERNAL_SETTLEMENT_REQUIRED: 'INVALID_REQUEST',
+};
+
+/**
+ * Contracts version this build aligns to.
+ * Bumped when conformance tests are updated against new @hlos-ai/schemas.
+ * Format: "paid.v{major}.{schemas_version}"
+ */
+export const CONTRACTS_VERSION = 'paid.v1.schemas-0.4.2' as const;
+
 export type PaidChannel = 'mcp' | 'skills' | 'bazaar' | 'enterprise';
 
 export interface PaidConfig {
@@ -619,7 +668,7 @@ export async function settleWithHlosKernel(
 
   if (!quoteId) {
     throw new PaidError(
-      'SETTLEMENT_MISSING_QUOTE_ID',
+      'INVALID_REQUEST',
       'quoteId is required. Pass quoteId directly or provide a challenge containing quote_id.',
       400,
       {
@@ -637,6 +686,9 @@ export async function settleWithHlosKernel(
       method: 'POST',
       headers: {
         'content-type': 'application/json',
+        'x-hlos-surface': HLOS_SURFACE,
+        'x-hlos-idempotency-key': requestId,
+        'x-hlos-correlation-id': requestId,
         'payment-signature': input.paymentSignature,
       },
       body: JSON.stringify({
@@ -649,7 +701,7 @@ export async function settleWithHlosKernel(
     });
   } catch (error) {
     throw new PaidError(
-      'SETTLEMENT_NETWORK_ERROR',
+      'SERVICE_UNAVAILABLE',
       'Failed to reach HLOS settlement endpoint',
       502,
       {
@@ -719,6 +771,9 @@ export function createHttpKernelAdapter(config: HttpKernelAdapterConfig = {}): P
         method: 'POST',
         headers: {
           'content-type': 'application/json',
+          'x-hlos-surface': HLOS_SURFACE,
+          'x-hlos-correlation-id': input.correlationId,
+          'x-hlos-idempotency-key': input.idempotencyKey,
         },
         body: JSON.stringify({
           sku_id: input.skuId,
@@ -733,7 +788,7 @@ export function createHttpKernelAdapter(config: HttpKernelAdapterConfig = {}): P
       const body = await safeResponseBody(response);
       if (response.status !== 402) {
         throw new PaidError(
-          'PAYMENT_CHALLENGE_FAILED',
+          'SERVICE_UNAVAILABLE',
           'Failed to obtain payment challenge',
           502,
           body
@@ -775,6 +830,10 @@ export function createHttpKernelAdapter(config: HttpKernelAdapterConfig = {}): P
 
       const response = await fetchImpl(url.toString(), {
         method: 'GET',
+        headers: {
+          'x-hlos-surface': HLOS_SURFACE,
+          'x-hlos-correlation-id': input.idempotencyKey,
+        },
       });
 
       if (!response.ok) {
@@ -928,27 +987,31 @@ function deriveSettleIdempotencyKey(
 
 function mapSettlementErrorCode(status: number, upstreamCode: string | undefined): string {
   const normalized = normalizeErrorCode(upstreamCode);
-  if (normalized) {
+  // If the upstream code is already a canonical KernelErrorCode, pass it through
+  if (normalized && CANONICAL_KERNEL_ERROR_CODES.has(normalized)) {
     return normalized;
   }
 
+  // Non-canonical upstream code present → fall back to status mapping.
+  // Deterministic fallback: 5xx → SERVICE_UNAVAILABLE, everything else → INTERNAL_ERROR.
+  // This prevents ambiguous error codes from leaking into downstream handling.
   switch (status) {
     case 400:
-      return 'SETTLEMENT_BAD_REQUEST';
+      return 'INVALID_REQUEST';
     case 401:
-      return 'SETTLEMENT_UNAUTHORIZED';
+      return 'UNAUTHORIZED';
     case 402:
-      return 'PAYMENT_REQUIRED';
+      return 'INSUFFICIENT_BALANCE';
     case 403:
       return 'FORBIDDEN';
     case 404:
-      return 'SETTLEMENT_NOT_FOUND';
+      return 'NOT_FOUND';
     case 409:
-      return 'SETTLEMENT_CONFLICT';
+      return 'CONFLICT';
     case 429:
       return 'RATE_LIMITED';
     default:
-      return status >= 500 ? 'SETTLEMENT_UPSTREAM_ERROR' : 'SETTLEMENT_FAILED';
+      return status >= 500 ? 'SERVICE_UNAVAILABLE' : 'INTERNAL_ERROR';
   }
 }
 
