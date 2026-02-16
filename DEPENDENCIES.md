@@ -1,53 +1,46 @@
 # Dependency Contract
 
-`@hlos/paid` is intentionally thin. It relies on public HTTP contracts and caller-provided proof.
+`@hlos/paid` is intentionally thin. It relies on public HTTP contracts plus caller-provided proof.
 
 ## Endpoints
 
-### `GET /api/v2/catalog/skus`
-- Used by callers/orchestrators to discover SKU metadata and pricing before invocation.
-- Wrapper does not require this call in-process.
-
 ### `POST /api/v2/x402/challenge`
 - Used by default HTTP adapter when payment proof is missing.
-- Expected result: `402` with x402-compatible challenge in body and `payment-required` header.
+- Expected result: `402` with x402-compatible challenge in body and optional `payment-required` header.
 
 ### `POST /api/v2/x402/settle`
 - **Not called by `paid()`**.
-- Settlement is external to this wrapper by default.
-- Optional helper `settleWithHlosKernel(...)` can call this explicitly.
+- Settlement remains external by default.
+- Optional helper `settleWithHlosKernel(...)` can call this endpoint explicitly.
 
 ### `GET /api/v2/x402/receipt`
 - Optional receipt hydration by default adapter when `receipt_id` or `request_id` is provided.
-- If unavailable, wrapper still proceeds with receipt stub metadata from proof.
+- If unavailable, wrapper proceeds with proof-derived receipt metadata.
 
-## Expected Payload Fragments
+### `GET /api/v2/catalog/skus`
+- Discovery/pricing endpoint used by orchestrators outside this wrapper.
 
-### Challenge response
+## Challenge/Proof Expectations
+
+Challenge response fragments:
 - `error.code = payment_required`
 - `error.payment = {...x402 payment_required...}`
 - optional `quote_id`
-- optional `payment-required` header
 
-### Settlement proof (provided by caller via `__hlos`)
-- `payment_signature` (required for paid path)
+Retry proof (`__hlos`) fragments:
+- `payment_signature` (required paid path)
 - one stable anchor: `receipt_id`, `request_id`, or `client_tag`
-- optional: `quote_id`, `receipt_hash`
+- optional `quote_id`, `receipt_hash`
 
-### Receipt envelope (optional hydration)
-- `receipt.receipt_id` (or `receipt.id`)
-- `receipt.content_hash` (optional)
-- `receipt.verification_url` (optional)
+## Idempotency Expectations
 
-## STAAMPID / Passport Headers
+For `paid()`:
+- MCP default: `mcp:${skuId}:${toolCallId}`
+- Skills default: `skills:${skuId}:${requestId|clientTag}`
 
-The wrapper reads these when present:
-- `x-staampid`
-- `x-staampid-trust`
-
-Use config guards for policy gates:
-- `requireStaampid`
-- `minTrustScore`
+For `settleWithHlosKernel(...)`:
+- accepts `idempotencyKey`
+- derives deterministic fallback if omitted
 
 ## Environment Variables
 

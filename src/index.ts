@@ -36,6 +36,8 @@ export interface PaidContext {
     url?: string;
   } | null;
   headers?: HeaderBag;
+  actorId?: string;
+  meta?: Record<string, unknown>;
   request_id?: string;
   correlationId?: string;
   toolCallId?: string | number;
@@ -102,7 +104,21 @@ export interface SettleResult {
   receiptHash?: string;
   paymentSigHash: string;
   verificationUrl?: string;
+  requestId: string;
   raw?: unknown;
+}
+
+export interface SettleRetryHlosPayload {
+  quote_id: string;
+  payment_signature: string;
+  receipt_id: string;
+  receipt_hash?: string;
+  request_id: string;
+}
+
+export interface SettleWithHlosKernelResult {
+  settlement: SettleResult;
+  __hlos: SettleRetryHlosPayload;
 }
 
 export interface ReceiptLookupInput {
@@ -158,6 +174,7 @@ export interface FetchResponseLike {
   status: number;
   headers?: FetchHeadersLike | Record<string, string | string[] | undefined>;
   json(): Promise<unknown>;
+  text?(): Promise<string>;
 }
 
 export type FetchLike = (url: string, init?: FetchInitLike) => Promise<FetchResponseLike>;
@@ -228,7 +245,29 @@ interface CacheEntry {
   receipt: PaidReceipt;
 }
 
+const SETTLEMENT_CACHE_MAX = 10_000;
 const settlementCache = new Map<string, CacheEntry>();
+
+function settlementCacheGet(key: string): CacheEntry | undefined {
+  const entry = settlementCache.get(key);
+  if (entry) {
+    // Refresh recency (LRU-ish): delete + re-insert moves key to end of insertion order
+    settlementCache.delete(key);
+    settlementCache.set(key, entry);
+  }
+  return entry;
+}
+
+function settlementCacheSet(key: string, entry: CacheEntry): void {
+  settlementCache.set(key, entry);
+  // Evict oldest entry if over capacity
+  if (settlementCache.size > SETTLEMENT_CACHE_MAX) {
+    const oldest = settlementCache.keys().next().value;
+    if (oldest !== undefined) {
+      settlementCache.delete(oldest);
+    }
+  }
+}
 
 export function resetPaidIdempotencyCache(): void {
   settlementCache.clear();
@@ -347,15 +386,22 @@ export function toMcpForbidden(
   };
 }
 
-export function toMcpToolErrorResult(payload: Record<string, unknown>): {
+export function toMcpToolErrorResult(
+  payload: McpPaymentRequiredPayload | McpForbiddenPayload | Record<string, unknown>
+): {
   isError: true;
   content: Array<{ type: 'text'; text: string }>;
   structuredContent: Record<string, unknown>;
 } {
+  const record: Record<string, unknown> =
+    typeof payload === 'object' && payload !== null && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : { value: payload };
+
   return {
     isError: true,
-    content: [{ type: 'text', text: JSON.stringify(payload) }],
-    structuredContent: payload,
+    content: [{ type: 'text', text: JSON.stringify(record) }],
+    structuredContent: record,
   };
 }
 
@@ -430,7 +476,7 @@ export function paid(config: PaidConfig) {
           fetchImpl: config.fetchImpl,
         });
 
-      const cacheHit = settlementCache.get(idempotencyKey);
+      const cacheHit = settlementCacheGet(idempotencyKey);
       let payment: PaidPayment;
       let receipt: PaidReceipt;
 
@@ -451,7 +497,7 @@ export function paid(config: PaidConfig) {
           const sandbox = buildSandboxArtifacts(config.skuId, idempotencyKey);
           payment = sandbox.payment;
           receipt = sandbox.receipt;
-          settlementCache.set(idempotencyKey, {
+          settlementCacheSet(idempotencyKey, {
             proofHash: sandboxProofHash,
             payment,
             receipt,
@@ -513,7 +559,7 @@ export function paid(config: PaidConfig) {
             },
           };
 
-          settlementCache.set(idempotencyKey, {
+          settlementCacheSet(idempotencyKey, {
             proofHash,
             payment,
             receipt,
@@ -552,7 +598,12 @@ export interface HttpKernelAdapterConfig {
   fetchImpl?: FetchLike;
 }
 
-export interface SettleWithHlosKernelInput extends SettleInput {
+export interface SettleWithHlosKernelInput {
+  skuId: string;
+  quoteId?: string;
+  challenge?: PaymentRequiredChallenge | Record<string, unknown>;
+  paymentSignature: string;
+  idempotencyKey?: string;
   apiBaseUrl?: string;
   fetchImpl?: FetchLike;
   capabilityId?: string;
@@ -561,63 +612,106 @@ export interface SettleWithHlosKernelInput extends SettleInput {
 
 export async function settleWithHlosKernel(
   input: SettleWithHlosKernelInput
-): Promise<SettleResult> {
+): Promise<SettleWithHlosKernelResult> {
   const fetchImpl = resolveFetch(input.fetchImpl);
-  const baseUrl = normalizeBaseUrl(input.apiBaseUrl ?? process.env.HLOS_BASE_URL ?? 'http://localhost:3000');
+  const baseUrl = normalizeBaseUrl(input.apiBaseUrl ?? envOrUndefined('HLOS_BASE_URL') ?? 'http://localhost:3000');
+  const quoteId = resolveSettleQuoteId(input.quoteId, input.challenge);
 
-  const response = await fetchImpl(`${baseUrl}/api/v2/x402/settle`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'payment-signature': input.paymentSignature,
-    },
-    body: JSON.stringify({
-      quote_id: input.quoteId,
-      sku_id: input.skuId,
-      request_id: input.idempotencyKey,
-      capability_id: input.capabilityId,
-      wallet_id: input.walletId,
-    }),
-  });
+  if (!quoteId) {
+    throw new PaidError(
+      'SETTLEMENT_MISSING_QUOTE_ID',
+      'quoteId is required. Pass quoteId directly or provide a challenge containing quote_id.',
+      400,
+      {
+        sku_id: input.skuId,
+      }
+    );
+  }
 
-  const body = await safeJson(response);
+  const requestId =
+    input.idempotencyKey ?? deriveSettleIdempotencyKey(input.skuId, quoteId, input.paymentSignature);
+
+  let response: FetchResponseLike;
+  try {
+    response = await fetchImpl(`${baseUrl}/api/v2/x402/settle`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'payment-signature': input.paymentSignature,
+      },
+      body: JSON.stringify({
+        quote_id: quoteId,
+        sku_id: input.skuId,
+        request_id: requestId,
+        capability_id: input.capabilityId,
+        wallet_id: input.walletId,
+      }),
+    });
+  } catch (error) {
+    throw new PaidError(
+      'SETTLEMENT_NETWORK_ERROR',
+      'Failed to reach HLOS settlement endpoint',
+      502,
+      {
+        sku_id: input.skuId,
+        quote_id: quoteId,
+        request_id: requestId,
+        cause: serializeUnknownError(error),
+      }
+    );
+  }
+
+  const body = await safeResponseBody(response);
   if (!response.ok) {
-    const code =
-      readString(readRecord(readUnknown(readRecord(body), 'error')), 'code')?.toUpperCase() ??
-      'SETTLEMENT_FAILED';
+    const errorEnvelope = readRecord(readUnknown(readRecord(body), 'error'));
+    const code = mapSettlementErrorCode(response.status, readString(errorEnvelope, 'code'));
     const message =
-      readString(readRecord(readUnknown(readRecord(body), 'error')), 'message') ??
-      'Payment settlement failed';
+      readString(errorEnvelope, 'message') ?? defaultSettlementErrorMessage(response.status);
 
-    throw new PaidError(code, message, response.status, body);
+    throw new PaidError(code, message, response.status, {
+      sku_id: input.skuId,
+      quote_id: quoteId,
+      request_id: requestId,
+      response: body,
+    });
   }
 
   const receiptId =
     readString(readRecord(body), 'receipt_id') ??
     getHeader(response.headers, 'x-hlos-receipt-id') ??
-    `receipt_${sha256Hex(`${input.idempotencyKey}:${input.paymentSignature}`).slice(0, 16)}`;
+    `receipt_${sha256Hex(`${requestId}:${input.paymentSignature}`).slice(0, 16)}`;
 
   const receiptHash =
     readString(readRecord(body), 'receipt_hash') ??
     readString(readRecord(readUnknown(readRecord(body), 'receipt')), 'content_hash') ??
     undefined;
 
-  const verificationUrl =
-    readString(readRecord(body), 'verification_url') ??
-    undefined;
+  const verificationUrl = readString(readRecord(body), 'verification_url') ?? undefined;
 
-  return {
+  const settlement: SettleResult = {
     receiptId,
     receiptHash,
     paymentSigHash: sha256Hex(input.paymentSignature),
     verificationUrl,
+    requestId,
     raw: body,
+  };
+
+  return {
+    settlement,
+    __hlos: {
+      quote_id: quoteId,
+      payment_signature: input.paymentSignature,
+      receipt_id: settlement.receiptId,
+      ...(settlement.receiptHash ? { receipt_hash: settlement.receiptHash } : {}),
+      request_id: settlement.requestId,
+    },
   };
 }
 
 export function createHttpKernelAdapter(config: HttpKernelAdapterConfig = {}): PaidKernelAdapter {
   const fetchImpl = resolveFetch(config.fetchImpl);
-  const baseUrl = normalizeBaseUrl(config.baseUrl ?? process.env.HLOS_BASE_URL ?? 'http://localhost:3000');
+  const baseUrl = normalizeBaseUrl(config.baseUrl ?? envOrUndefined('HLOS_BASE_URL') ?? 'http://localhost:3000');
 
   return {
     async challenge(input: ChallengeInput): Promise<PaymentRequiredChallenge> {
@@ -636,7 +730,7 @@ export function createHttpKernelAdapter(config: HttpKernelAdapterConfig = {}): P
         }),
       });
 
-      const body = await safeJson(response);
+      const body = await safeResponseBody(response);
       if (response.status !== 402) {
         throw new PaidError(
           'PAYMENT_CHALLENGE_FAILED',
@@ -687,7 +781,7 @@ export function createHttpKernelAdapter(config: HttpKernelAdapterConfig = {}): P
         return null;
       }
 
-      const body = await safeJson(response);
+      const body = await safeResponseBody(response);
       const receiptRecord = readRecord(readUnknown(readRecord(body), 'receipt'));
       const id =
         readString(receiptRecord, 'receipt_id') ??
@@ -790,11 +884,126 @@ function hasSettlementProof(proof: PaidProof): boolean {
 
 function resolveBaseUrl(configBaseUrl: string | undefined, ctx: PaidContext): string {
   const fromContextRequest = ctx.request?.url ? new URL(ctx.request.url).origin : undefined;
-  return normalizeBaseUrl(configBaseUrl ?? fromContextRequest ?? process.env.HLOS_BASE_URL ?? 'http://localhost:3000');
+  return normalizeBaseUrl(configBaseUrl ?? fromContextRequest ?? envOrUndefined('HLOS_BASE_URL') ?? 'http://localhost:3000');
 }
 
 function normalizeBaseUrl(value: string): string {
   return value.replace(/\/$/, '');
+}
+
+function envOrUndefined(name: string): string | undefined {
+  if (typeof process !== 'undefined' && typeof process.env === 'object') {
+    return process.env[name] ?? undefined;
+  }
+  return undefined;
+}
+
+function resolveSettleQuoteId(
+  directQuoteId: string | undefined,
+  challenge: PaymentRequiredChallenge | Record<string, unknown> | undefined
+): string | undefined {
+  if (!challenge) {
+    return directQuoteId;
+  }
+
+  const challengeRecord = readRecord(challenge);
+  const challengeRaw = readRecord(readUnknown(challengeRecord, 'raw'));
+
+  return firstString(
+    directQuoteId,
+    readString(challengeRecord, 'quote_id'),
+    readString(challengeRaw, 'quote_id'),
+    readString(readRecord(readUnknown(challengeRecord, 'hlos')), 'quote_id'),
+    readString(readRecord(readUnknown(challengeRecord, 'error')), 'quote_id')
+  );
+}
+
+function deriveSettleIdempotencyKey(
+  skuId: string,
+  quoteId: string,
+  paymentSignature: string
+): string {
+  return `settle:${skuId}:${sha256Hex(`${quoteId}:${paymentSignature}`).slice(0, 24)}`;
+}
+
+function mapSettlementErrorCode(status: number, upstreamCode: string | undefined): string {
+  const normalized = normalizeErrorCode(upstreamCode);
+  if (normalized) {
+    return normalized;
+  }
+
+  switch (status) {
+    case 400:
+      return 'SETTLEMENT_BAD_REQUEST';
+    case 401:
+      return 'SETTLEMENT_UNAUTHORIZED';
+    case 402:
+      return 'PAYMENT_REQUIRED';
+    case 403:
+      return 'FORBIDDEN';
+    case 404:
+      return 'SETTLEMENT_NOT_FOUND';
+    case 409:
+      return 'SETTLEMENT_CONFLICT';
+    case 429:
+      return 'RATE_LIMITED';
+    default:
+      return status >= 500 ? 'SETTLEMENT_UPSTREAM_ERROR' : 'SETTLEMENT_FAILED';
+  }
+}
+
+function defaultSettlementErrorMessage(status: number): string {
+  switch (status) {
+    case 400:
+      return 'Settlement request is invalid';
+    case 401:
+      return 'Settlement request is unauthorized';
+    case 402:
+      return 'Payment is still required to settle this quote';
+    case 403:
+      return 'Settlement is forbidden';
+    case 404:
+      return 'Settlement quote was not found';
+    case 409:
+      return 'Settlement conflict';
+    case 429:
+      return 'Settlement rate limited';
+    default:
+      return status >= 500 ? 'Settlement upstream error' : 'Payment settlement failed';
+  }
+}
+
+function normalizeErrorCode(value: string | undefined): string | undefined {
+  if (!value || value.trim().length === 0) {
+    return undefined;
+  }
+
+  const normalized = value
+    .trim()
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toUpperCase();
+
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function serializeUnknownError(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+    };
+  }
+
+  if (typeof error === 'string') {
+    return {
+      message: error,
+    };
+  }
+
+  return {
+    value: error,
+  };
 }
 
 function resolveFetch(fetchImpl?: FetchLike): FetchLike {
@@ -1046,10 +1255,18 @@ function readReservedHlos<Input>(input: Input): Record<string, unknown> | undefi
   return isRecord(value) ? value : undefined;
 }
 
-async function safeJson(response: FetchResponseLike): Promise<unknown> {
+async function safeResponseBody(response: FetchResponseLike): Promise<unknown> {
   try {
     return await response.json();
   } catch {
+    try {
+      if (typeof response.text === 'function') {
+        return await response.text();
+      }
+    } catch {
+      return undefined;
+    }
+
     return undefined;
   }
 }
@@ -1138,5 +1355,7 @@ function sha256Hex(input: string): string {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
+
+export * from './context';
