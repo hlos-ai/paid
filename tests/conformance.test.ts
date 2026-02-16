@@ -284,19 +284,18 @@ describe('error code conformance', () => {
         response(status, { error: { message: 'test' } }),
       );
 
-      try {
-        await settleWithHlosKernel({
-          apiBaseUrl: 'http://hlos.test',
-          fetchImpl,
-          skuId: 'test.conform.v1',
-          quoteId: 'quote_err_test',
-          paymentSignature: 'sig_err_test',
-        });
-      } catch (err: any) {
-        expect(
-          CANONICAL_KERNEL_ERROR_CODES.has(err.code),
-        ).toBe(true);
-      }
+      const err: any = await settleWithHlosKernel({
+        apiBaseUrl: 'http://hlos.test',
+        fetchImpl,
+        skuId: 'test.conform.v1',
+        quoteId: 'quote_err_test',
+        paymentSignature: 'sig_err_test',
+      }).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(Error);
+      expect(
+        CANONICAL_KERNEL_ERROR_CODES.has(err.code),
+      ).toBe(true);
     }
   });
 
@@ -307,23 +306,21 @@ describe('error code conformance', () => {
       response(418, { error: { code: 'TEAPOT_OVERFLOW', message: 'I am a teapot' } }),
     );
 
-    try {
-      await settleWithHlosKernel({
+    await expect(
+      settleWithHlosKernel({
         apiBaseUrl: 'http://hlos.test',
         fetchImpl,
         skuId: 'test.conform.v1',
         quoteId: 'quote_unknown_code',
         paymentSignature: 'sig_unknown_code',
-      });
-    } catch (err: any) {
+      }),
+    ).rejects.toMatchObject({
       // 418 < 500 → INTERNAL_ERROR (deterministic fallback for non-mapped client errors)
-      expect(err.code).toBe('INTERNAL_ERROR');
-      expect(CANONICAL_KERNEL_ERROR_CODES.has(err.code)).toBe(true);
-      // Original error preserved in details for logging
-      expect(err.details.response).toMatchObject({
-        error: { code: 'TEAPOT_OVERFLOW' },
-      });
-    }
+      code: 'INTERNAL_ERROR',
+      details: {
+        response: { error: { code: 'TEAPOT_OVERFLOW' } },
+      },
+    });
   });
 
   it('5xx with non-canonical code falls back to SERVICE_UNAVAILABLE', async () => {
@@ -331,17 +328,17 @@ describe('error code conformance', () => {
       response(503, { error: { code: 'CUSTOM_OVERLOAD', message: 'overloaded' } }),
     );
 
-    try {
-      await settleWithHlosKernel({
+    await expect(
+      settleWithHlosKernel({
         apiBaseUrl: 'http://hlos.test',
         fetchImpl,
         skuId: 'test.conform.v1',
         quoteId: 'quote_5xx',
         paymentSignature: 'sig_5xx',
-      });
-    } catch (err: any) {
-      expect(err.code).toBe('SERVICE_UNAVAILABLE');
-    }
+      }),
+    ).rejects.toMatchObject({
+      code: 'SERVICE_UNAVAILABLE',
+    });
   });
 
   it('upstream canonical error codes pass through unchanged', async () => {
@@ -358,17 +355,17 @@ describe('error code conformance', () => {
         response(409, { error: { code, message: 'test' } }),
       );
 
-      try {
-        await settleWithHlosKernel({
+      await expect(
+        settleWithHlosKernel({
           apiBaseUrl: 'http://hlos.test',
           fetchImpl,
           skuId: 'test.conform.v1',
           quoteId: 'quote_passthrough',
           paymentSignature: 'sig_passthrough',
-        });
-      } catch (err: any) {
-        expect(err.code).toBe(code);
-      }
+        }),
+      ).rejects.toMatchObject({
+        code,
+      });
     }
   });
 });
