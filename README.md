@@ -2,6 +2,87 @@
 
 Turn any MCP tool or API route into a paid capability in one line of code.
 
+## 5-Minute Quickstart (Hackathon Edition)
+
+Turn any API route into a paid endpoint in one line.
+
+### 1. Install
+
+```bash
+npm install @hlos/paid
+```
+
+### 2. Set Environment Variables
+
+```bash
+export HLOS_BASE_URL=https://sandbox.hlos.ai
+export HLOS_API_KEY=hackathon-oakland
+```
+
+Use the sandbox endpoint for hackathon testing.
+
+### 3. Wrap Your Route (Express Example)
+
+```ts
+import express from "express";
+import {
+  buildPaidContextFromHttp,
+  isPaidError,
+  paid,
+  toHttpErrorResponse,
+} from "@hlos/paid";
+
+const app = express();
+app.use(express.json());
+
+const helloRoute = paid({ skuId: "hello.world.v1", channel: "skills", sandbox: true })(
+  async () => {
+    return { message: "Hello paid world." };
+  }
+);
+
+app.post("/api/hello", async (req, res, next) => {
+  try {
+    const ctx = buildPaidContextFromHttp({
+      skuId: "hello.world.v1",
+      headers: req.headers,
+      requestId: req.header("x-request-id") ?? req.body?.__hlos?.request_id,
+      clientTag: req.body?.__hlos?.client_tag,
+    });
+
+    ctx.__hlos = req.body?.__hlos;
+    ctx.paymentProof = req.body?.__hlos;
+
+    const result = await helloRoute(ctx, req.body ?? {});
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.use((err, req, res, next) => {
+  if (isPaidError(err)) {
+    const httpError = toHttpErrorResponse(err);
+    return res.status(httpError.status).set(httpError.headers).json(httpError.body);
+  }
+  next(err);
+});
+
+app.listen(3000);
+```
+
+### 4. Call It
+
+First call returns `402 PAYMENT_REQUIRED`.
+
+Then:
+- Settle externally (or use `settleWithHlosKernel(...)`).
+- Retry with `__hlos`.
+
+### That's It
+
+You just monetized an API route.
+
 ```ts
 import { paid } from '@hlos/paid';
 
