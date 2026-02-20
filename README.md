@@ -16,10 +16,7 @@ npm install @hlos/paid
 
 ```bash
 export HLOS_BASE_URL=https://sandbox.hlos.ai
-export HLOS_API_KEY=hackathon-oakland
 ```
-
-Use the sandbox endpoint for hackathon testing.
 
 ### 3. Wrap Your Route (Express Example)
 
